@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>午饭搭子 · 今天午饭吃什么</title>
+  <meta name="description" content="一个依托外卖平台商家库的午饭推荐 Agent 演示：按口味、忌口、近两天记忆，为你挑一碗。" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🍚</text></svg>" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+
+  <div class="page">
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="午饭搭子首页">
+        <span class="brand-mark" aria-hidden="true">饭</span>
+        <span class="brand-name">午饭搭子</span>
+        <span class="demo-pill">DEMO · 模拟数据</span>
+      </a>
+      <div class="top-right">
+        <span class="date" id="dateLabel"></span>
+        <span class="loc">中关村 · 软件园</span>
+      </div>
+    </header>
+
+    <section class="hero">
+      <p class="eyebrow"><span class="eyebrow-dot"></span>中午好，小A · 一个人也要好好吃饭</p>
+      <h1>今天午饭，<br /><em>不用再翻了。</em></h1>
+      <p class="hero-sub">我从平台现有的商家库里挑了一碗：合你口味、避开忌口，也不和前两天重样。你只需要决定「吃」还是「换」。</p>
+      <div class="hero-chips" id="heroChips" aria-label="当前偏好摘要"></div>
+    </section>
+
+    <div class="layout">
+      <main class="main-col">
+        <section id="pickSection" aria-live="polite"></section>
+        <section class="runner-wrap" id="runnerSection"></section>
+        <section id="traceSection"></section>
+      </main>
+
+      <aside class="side-col">
+        <section class="panel profile-panel" aria-labelledby="profileTitle">
+          <div class="panel-head">
+            <h2 id="profileTitle">我的口味</h2>
+            <span class="live-tag"><i></i>改动即时生效</span>
+          </div>
+
+          <div class="field">
+            <div class="field-label">喜欢的口味<span>可多选</span></div>
+            <div class="chips" id="tasteChips"></div>
+          </div>
+
+          <div class="field">
+            <div class="field-label">不吃的食材<span>勾选后直接排除</span></div>
+            <div class="chips chips-avoid" id="avoidChips"></div>
+          </div>
+
+          <div class="switch-list">
+            <div class="switch-row">
+              <div>
+                <strong>少油少炸</strong>
+                <small>优先蒸、煮、炖，少选炸物</small>
+              </div>
+              <button class="switch" type="button" role="switch" data-action="toggle-healthy" aria-label="少油少炸"></button>
+            </div>
+            <div class="switch-row">
+              <div>
+                <strong>主食优先</strong>
+                <small>尽量选带饭、面、粉的套餐</small>
+              </div>
+              <button class="switch" type="button" role="switch" data-action="toggle-staple" aria-label="主食优先"></button>
+            </div>
+          </div>
+
+          <div class="field budget-field">
+            <div class="field-label">每餐预算<span id="budgetOut">¥45 以内</span></div>
+            <input type="range" id="budgetRange" min="15" max="60" step="1" value="45" aria-label="每餐预算" />
+            <div class="range-scale"><span>¥15</span><span>¥60</span></div>
+          </div>
+        </section>
+
+        <section class="panel memory-panel" aria-labelledby="memoryTitle">
+          <div class="panel-head">
+            <h2 id="memoryTitle">午饭记忆</h2>
+            <span class="rule-pill">48h 去重</span>
+          </div>
+          <p class="rule-copy">同一道主菜，最近两天不重复。历史会直接进入推荐的硬筛选，而不是只做提示。</p>
+          <div class="timeline" id="historyTimeline"></div>
+          <button class="btn-next-day" type="button" data-action="next-day">模拟到明天 <span>→</span></button>
+          <button class="text-link" type="button" data-action="reset">重置演示数据</button>
+        </section>
+
+        <p class="footnote">演示使用本地模拟商家库（10 家 / 44 道菜），不连接真实外卖平台。推荐由可解释的规则排序生成。</p>
+      </aside>
+    </div>
+
+    <footer class="page-foot">
+      <span>午饭搭子 · Lunch Buddy</span>
+      <span>一个关于「少做一次选择」的推荐 Agent 小实验</span>
+    </footer>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <div class="modal" id="successModal" hidden>
+    <div class="modal-backdrop" data-action="close-modal"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="successTitle">
+      <button class="modal-close" type="button" data-action="close-modal" aria-label="关闭">×</button>
+      <div class="success-emoji" id="successEmoji">🍚</div>
+      <p class="success-kicker">今天午饭定了</p>
+      <h2 id="successTitle">就吃它</h2>
+      <p class="success-dish" id="successDish"></p>
+      <p class="success-note">已写入今天的午饭记忆。同一个主菜，接下来 48 小时不会再出现在推荐里。</p>
+      <button class="btn-primary modal-ok" type="button" data-action="close-modal">好，开饭</button>
+    </div>
+  </div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
