@@ -2,7 +2,8 @@
 
 一个可体验的午饭推荐 Agent Demo：依托外卖平台现有的商家数据库，帮一个人在办公室快速决定午饭。
 
-**在线体验：** 部署完成后见仓库右侧 About 中的 Pages 链接（`https://augirt.github.io/lunch-buddy/`）。
+**在线体验：** <https://augirt.github.io/lunch-buddy/>
+**代码仓库：** <https://github.com/Augirt/lunch-buddy>
 
 ![产品预览](assets/preview.png)
 
