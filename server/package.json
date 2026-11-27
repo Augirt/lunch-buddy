@@ -1,0 +1,12 @@
+{
+  "name": "lunch-buddy-server",
+  "version": "1.1.0",
+  "private": true,
+  "description": "午饭搭子：百炼 Qwen 推荐、偏好解析和规则兜底",
+  "engines": { "node": ">=22.6.0" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env index.cjs",
+    "test": "node --test test/*.test.cjs",
+    "smoke": "node --env-file=.env smoke.cjs"
+  }
+}

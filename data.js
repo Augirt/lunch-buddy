@@ -359,3 +359,8 @@ const SEED_HISTORY = [
   { dishId: 'd26', dayIndex: -1 },
   { dishId: 'd28', dayIndex: -2 },
 ];
+
+/* 浏览器和服务端使用同一份商家目录，避免模型凭空创造餐品。 */
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { MERCHANTS, DISHES, TASTE_OPTIONS, AVOID_OPTIONS, DEFAULT_PROFILE, SEED_HISTORY };
+}

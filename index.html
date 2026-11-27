@@ -1,121 +1,128 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>午饭搭子 · 今天午饭吃什么</title>
-  <meta name="description" content="一个依托外卖平台商家库的午饭推荐 Agent 演示：按口味、忌口、近两天记忆，为你挑一碗。" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🍚</text></svg>" />
-  <link rel="stylesheet" href="styles.css" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ed5527">
+  <title>好好吃外卖 · 午饭搭子</title>
+  <meta name="description" content="模拟外卖平台，用大模型午饭搭子理解口味、记住忌口，从商家库里帮你挑午饭。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='26' fill='%23ed5527'/%3E%3Ctext x='50' y='71' text-anchor='middle' font-size='67' fill='white'%3E吃%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="ambient ambient-a" aria-hidden="true"></div>
-  <div class="ambient ambient-b" aria-hidden="true"></div>
-
-  <div class="page">
-    <header class="topbar">
-      <a class="brand" href="./" aria-label="午饭搭子首页">
-        <span class="brand-mark" aria-hidden="true">饭</span>
-        <span class="brand-name">午饭搭子</span>
-        <span class="demo-pill">DEMO · 模拟数据</span>
-      </a>
-      <div class="top-right">
-        <span class="date" id="dateLabel"></span>
-        <span class="loc">中关村 · 软件园</span>
+  <header class="site-header">
+    <div class="header-inner">
+      <a href="./" class="brand"><span class="brand-icon">吃</span><span>好好吃<small>外卖</small></span></a>
+      <div class="delivery-address">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 10c0 5-7 11-7 11S5 15 5 10a7 7 0 1 1 14 0Z"/><circle cx="12" cy="10" r="2.5"/></svg>
+        <span><small>配送至</small><strong>中关村 · 软件园办公室</strong></span>
       </div>
-    </header>
+      <form id="searchForm" class="search-box" role="search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+        <input id="searchInput" type="search" placeholder="搜索商家、菜名或口味" aria-label="搜索商家或菜名" autocomplete="off">
+        <button type="submit">搜索</button>
+      </form>
+      <button class="user-button" type="button" data-action="memory"><span class="user-avatar">A</span><span>小A <small>午饭记录</small></span></button>
+    </div>
+  </header>
 
-    <section class="hero">
-      <p class="eyebrow"><span class="eyebrow-dot"></span>中午好，小A · 一个人也要好好吃饭</p>
-      <h1>今天午饭，<br /><em>不用再翻了。</em></h1>
-      <p class="hero-sub">我从平台现有的商家库里挑了一碗：合你口味、避开忌口，也不和前两天重样。你只需要决定「吃」还是「换」。</p>
-      <div class="hero-chips" id="heroChips" aria-label="当前偏好摘要"></div>
+  <main class="market">
+    <nav class="market-nav" aria-label="主导航">
+      <span class="nav-active">外卖</span>
+      <button type="button" data-action="memory">我的午饭</button>
+      <span class="demo-label"><i></i>演示商家 · 模拟下单</span>
+    </nav>
+    <section class="lunch-banner" aria-labelledby="bannerTitle">
+      <div class="banner-copy">
+        <p class="banner-eyebrow">午间食光 <span>11:00 — 14:00</span></p>
+        <h1 id="bannerTitle">一顿好午饭，<br>给下午充个电。</h1>
+        <p>饭、面、轻食，附近的好味道都在这里。</p>
+        <button class="button-primary" type="button" data-action="assistant">不知道吃什么？找午饭搭子 <span>↗</span></button>
+      </div>
+      <div class="banner-photo" id="bannerArt" aria-label="一人份午饭餐品插画"></div>
+      <span class="banner-seal">好好吃饭<br>好好上班</span>
     </section>
 
-    <div class="layout">
-      <main class="main-col">
-        <section id="pickSection" aria-live="polite"></section>
-        <section class="runner-wrap" id="runnerSection"></section>
-        <section id="traceSection"></section>
-      </main>
+    <nav class="categories" id="categories" aria-label="餐品分类"></nav>
+    <section class="store-section" aria-labelledby="storesTitle">
+      <div class="section-heading">
+        <div><h2 id="storesTitle">附近的好味道</h2><p id="storeCount">营业中的商家，为你准时送达</p></div>
+        <div class="sort-controls">
+          <label class="sr-only" for="sortSelect">商家排序</label>
+          <select id="sortSelect"><option value="popular">人气优先</option><option value="rating">评分最高</option><option value="fast">送得最快</option></select>
+        </div>
+      </div>
+      <div class="store-grid" id="storeGrid"></div>
+      <div class="empty-search" id="emptySearch" hidden><span>⌕</span><h3>没有找到这道味道</h3><p>试试菜名、商家名，或让午饭搭子帮你找。</p><button type="button" class="button-soft" data-action="clear-search">看看全部商家</button></div>
+    </section>
+    <footer class="site-footer"><span>好好吃外卖 · 产品 Demo</span><span>模拟商家与订单 · 餐品为原创插画</span><button type="button" data-action="settings">口味与模型设置</button></footer>
+  </main>
 
-      <aside class="side-col">
-        <section class="panel profile-panel" aria-labelledby="profileTitle">
-          <div class="panel-head">
-            <h2 id="profileTitle">我的口味</h2>
-            <span class="live-tag"><i></i>改动即时生效</span>
-          </div>
+  <div id="assistantNudge" class="assistant-nudge"><span>午饭又不知道选什么？<br><strong>告诉我想吃什么，帮你挑。</strong></span><button type="button" data-action="dismiss-nudge" aria-label="关闭提示">×</button></div>
+  <button id="assistantLauncher" class="assistant-launcher" type="button" data-action="assistant" aria-controls="assistantPanel" aria-expanded="false">
+    <span class="buddy-avatar" aria-hidden="true">饭<span>✦</span></span><span>午饭搭子<small>聊一聊，帮你挑</small></span>
+  </button>
 
-          <div class="field">
-            <div class="field-label">喜欢的口味<span>可多选</span></div>
-            <div class="chips" id="tasteChips"></div>
-          </div>
+  <section class="assistant-panel" id="assistantPanel" hidden aria-label="午饭搭子聊天助手">
+    <header class="assistant-header">
+      <span class="buddy-avatar" aria-hidden="true">饭<span>✦</span></span>
+      <div class="assistant-title"><h2>午饭搭子 <span>AI</span></h2><p id="connectionLabel"><i></i>正在检查模型连接</p></div>
+      <button class="icon-button" type="button" data-action="settings" aria-label="口味与模型设置" title="口味与模型设置">⚙</button>
+      <button class="icon-button" type="button" data-action="close-assistant" aria-label="收起小助手">—</button>
+    </header>
+    <div class="assistant-context"><span id="contextLabel">记住你的口味，避开近两天的主菜</span><button type="button" data-action="memory">查看记忆 ↗</button></div>
+    <div class="chat-scroll" id="chatMessages" role="log" aria-live="polite" aria-relevant="additions"></div>
+    <div class="chat-progress" id="chatProgress" hidden><span class="thinking-dots"><i></i><i></i><i></i></span><span id="progressText">正在理解你的需求</span><button type="button" data-action="cancel">取消</button></div>
+    <form id="chatForm" class="chat-composer">
+      <label for="chatInput" class="sr-only">告诉午饭搭子你想吃什么</label>
+      <textarea id="chatInput" rows="2" maxlength="500" placeholder="想吃什么、预算多少、不吃什么？" aria-describedby="composerHint"></textarea>
+      <div class="composer-bottom"><small id="composerHint">Enter 发送 · Shift + Enter 换行</small><button id="sendButton" type="submit" aria-label="发送消息"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg></button></div>
+    </form>
+    <div class="assistant-bottom"><span>餐品来自商家库 · 大模型理解与选餐</span><button type="button" data-action="new-chat">新对话</button></div>
+  </section>
 
-          <div class="field">
-            <div class="field-label">不吃的食材<span>勾选后直接排除</span></div>
-            <div class="chips chips-avoid" id="avoidChips"></div>
-          </div>
-
-          <div class="switch-list">
-            <div class="switch-row">
-              <div>
-                <strong>少油少炸</strong>
-                <small>优先蒸、煮、炖，少选炸物</small>
-              </div>
-              <button class="switch" type="button" role="switch" data-action="toggle-healthy" aria-label="少油少炸"></button>
-            </div>
-            <div class="switch-row">
-              <div>
-                <strong>主食优先</strong>
-                <small>尽量选带饭、面、粉的套餐</small>
-              </div>
-              <button class="switch" type="button" role="switch" data-action="toggle-staple" aria-label="主食优先"></button>
-            </div>
-          </div>
-
-          <div class="field budget-field">
-            <div class="field-label">每餐预算<span id="budgetOut">¥45 以内</span></div>
-            <input type="range" id="budgetRange" min="15" max="60" step="1" value="45" aria-label="每餐预算" />
-            <div class="range-scale"><span>¥15</span><span>¥60</span></div>
-          </div>
-        </section>
-
-        <section class="panel memory-panel" aria-labelledby="memoryTitle">
-          <div class="panel-head">
-            <h2 id="memoryTitle">午饭记忆</h2>
-            <span class="rule-pill">48h 去重</span>
-          </div>
-          <p class="rule-copy">同一道主菜，最近两天不重复。历史会直接进入推荐的硬筛选，而不是只做提示。</p>
-          <div class="timeline" id="historyTimeline"></div>
-          <button class="btn-next-day" type="button" data-action="next-day">模拟到明天 <span>→</span></button>
-          <button class="text-link" type="button" data-action="reset">重置演示数据</button>
-        </section>
-
-        <p class="footnote">演示使用本地模拟商家库（10 家 / 44 道菜），不连接真实外卖平台。推荐由可解释的规则排序生成。</p>
-      </aside>
-    </div>
-
-    <footer class="page-foot">
-      <span>午饭搭子 · Lunch Buddy</span>
-      <span>一个关于「少做一次选择」的推荐 Agent 小实验</span>
-    </footer>
+  <div class="overlay" id="settingsModal" hidden>
+    <div class="overlay-shade" data-action="close-settings"></div>
+    <section class="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <button class="dialog-close" type="button" data-action="close-settings" aria-label="关闭模型设置">×</button>
+      <p class="dialog-kicker">午饭搭子</p><h2 id="settingsTitle">记住你的口味</h2>
+      <p class="dialog-description">改一次，每次选餐都会带上。</p>
+      <form id="settingsForm">
+        <label>喜欢的口味 <small>可多选</small></label><div class="preference-chips" id="tasteChips"></div>
+        <label>不吃的食材 <small>选中后直接排除</small></label><div class="preference-chips avoid-chips" id="avoidChips"></div>
+        <div class="preference-switches">
+          <label class="checkbox-label"><input id="healthyPreference" type="checkbox"><span>少油少炸<small>优先用油少、非油炸的餐品</small></span></label>
+          <label class="checkbox-label"><input id="staplePriorityPreference" type="checkbox"><span>主食优先<small>这顿饭，尽量吃得饱</small></span></label>
+        </div>
+        <label for="staplePreference">偏好的主食</label><select id="staplePreference"></select>
+        <label for="budgetPreference">每餐预算 <strong id="budgetLabel">¥45以内</strong></label>
+        <input id="budgetPreference" type="range" min="15" max="60" step="1" value="45">
+        <details class="model-settings-details"><summary>模型连接状态</summary><div class="server-status" id="serverStatus"></div><p class="settings-note">模型通过后台服务调用；未配置时使用明确标注的规则演示。API Key 不会进入浏览器。</p></details>
+        <p id="settingsError" class="form-error" role="alert" hidden></p>
+        <button class="button-primary settings-save" type="submit" id="saveSettings">保存偏好，帮我挑 →</button>
+      </form>
+    </section>
   </div>
 
-  <div class="toast" id="toast" role="status" aria-live="polite"></div>
-
-  <div class="modal" id="successModal" hidden>
-    <div class="modal-backdrop" data-action="close-modal"></div>
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="successTitle">
-      <button class="modal-close" type="button" data-action="close-modal" aria-label="关闭">×</button>
-      <div class="success-emoji" id="successEmoji">🍚</div>
-      <p class="success-kicker">今天午饭定了</p>
-      <h2 id="successTitle">就吃它</h2>
-      <p class="success-dish" id="successDish"></p>
-      <p class="success-note">已写入今天的午饭记忆。同一个主菜，接下来 48 小时不会再出现在推荐里。</p>
-      <button class="btn-primary modal-ok" type="button" data-action="close-modal">好，开饭</button>
-    </div>
+  <div class="overlay" id="shopModal" hidden>
+    <div class="overlay-shade" data-action="close-shop"></div>
+    <section class="dialog shop-dialog" role="dialog" aria-modal="true" aria-labelledby="shopTitle">
+      <button class="dialog-close" type="button" data-action="close-shop" aria-label="关闭商家菜单">×</button>
+      <div id="shopContent"></div>
+    </section>
   </div>
-
+  <div class="overlay" id="memoryModal" hidden>
+    <div class="overlay-shade" data-action="close-memory"></div>
+    <section class="dialog memory-dialog" role="dialog" aria-modal="true" aria-labelledby="memoryTitle">
+      <button class="dialog-close" type="button" data-action="close-memory" aria-label="关闭午饭记忆">×</button>
+      <p class="dialog-kicker">每一顿，都记得</p><h2 id="memoryTitle">我的午饭记忆</h2>
+      <p class="dialog-description">助手会避开今天和近两天吃过的同一道主菜。</p>
+      <div id="memoryContent"></div>
+      <button class="button-primary" type="button" data-action="next-day">模拟到明天 →</button>
+      <button class="text-button" type="button" data-action="reset">重置演示数据</button>
+    </section>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
   <script src="data.js"></script>
   <script src="app.js"></script>
 </body>
