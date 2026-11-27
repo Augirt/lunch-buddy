@@ -43,7 +43,7 @@ function readConfig(env = process.env) {
     apiKey: env.DASHSCOPE_API_KEY?.trim() || '',
     baseUrl, model: env.QWEN_MODEL || 'qwen3.8-flash',
     timeoutMs: number('MODEL_TIMEOUT_MS', 8000, 1000, 60000),
-    maxTokens: number('MODEL_MAX_TOKENS', 800, 300, 2000),
+    maxTokens: number('MODEL_MAX_TOKENS', 600, 300, 2000),
     host: env.HOST || '127.0.0.1', port: number('PORT', 3000, 1, 65535),
   };
 }
@@ -80,6 +80,16 @@ function preserveAvoid(profile, previous, text) {
       new RegExp(`(?:^|[，,。；;\\s])(?:现在)?(?:可以吃|取消忌口[:：]?)${label}`).test(text));
   });
   return { ...profile, avoid: [...new Set([...protectedIds, ...profile.avoid])] };
+}
+
+const LIGHT_TASTE = /清淡|清爽|养胃|不辣|不吃辣|不要辣|少辣|别太辣|不要太辣|口味轻/;
+
+function applyTasteIntent(profile, text) {
+  // 菜单里有“清淡”标签：用户原话必须先落到标签上，不能只留给模型解释成少油。
+  if (!LIGHT_TASTE.test(text)) return profile;
+  const tastes = profile.tastes.filter((taste) => taste !== '微辣' && taste !== '重辣');
+  if (!tastes.includes('清淡')) tastes.push('清淡');
+  return { ...profile, tastes };
 }
 
 function createApp(config = readConfig(), options = {}) {
@@ -218,7 +228,8 @@ function createApp(config = readConfig(), options = {}) {
               supported_staples: engine.STAPLES, messages,
             }, catalog, engine);
             const { message, unsupported_avoid, needs_clarification, ...parsedProfile } = response.result;
-            const profile = preserveAvoid(parsedProfile, state.profile, input.text);
+            // 口味意图在服务端兜底落实；忌口、预算、主食仍按解析结果和原档案处理。
+            const profile = preserveAvoid(applyTasteIntent(parsedProfile, input.text.trim()), state.profile, input.text);
             if (unsupported_avoid.length || needs_clarification) {
               const code = unsupported_avoid.length ? 'unsupported_avoid' : 'clarification_required';
               if (!isChat) return json(res, 422, { error: message, code, unsupported_avoid });
@@ -271,4 +282,4 @@ if (require.main === module) {
     console.log(config.apiKey ? `模型：${config.model}（服务端配置已读取）` : '尚未配置 API Key：规则推荐可用，配置后重启即可启用 Qwen。');
   });
 }
-module.exports = { createApp, readConfig, engine };
+module.exports = { createApp, readConfig, engine, applyTasteIntent };

@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
 const catalog = require('../../data.js');
-const { createApp, readConfig, engine } = require('../index.cjs');
+const { createApp, readConfig, engine, applyTasteIntent } = require('../index.cjs');
 const { validatePicks } = require('../model.cjs');
 
 const input = () => ({
@@ -133,7 +133,7 @@ test('禁止模型编造 ID、重复 ID、冒用其他餐品属性', () => {
     { dish_id: 'd1', matched: ['咸鲜'], reason: '这一份口味咸鲜，适合今天的午饭。' },
     { dish_id: 'd2', matched: ['清淡'], reason: '这一份口味清淡，适合今天的午饭。' },
   ] };
-  assert.equal(validatePicks(valid, candidates), valid);
+  assert.deepEqual(validatePicks(valid, candidates), valid);
   for (const bad of [
     { ...valid, picks: [{ ...valid.picks[0], dish_id: 'fake' }, valid.picks[1]] },
     { ...valid, picks: [valid.picks[0], valid.picks[0]] },
@@ -141,6 +141,19 @@ test('禁止模型编造 ID、重复 ID、冒用其他餐品属性', () => {
   ]) assert.throws(() => validatePicks(bad, candidates));
 });
 
+test('真实模型多返回有效匹配标签时归一化，未知标签仍被拒绝', () => {
+  const facts = ['咸鲜', '微辣', '做法：煮', '主食：面条', '价格：22元'];
+  const value = {
+    summary: '今天推荐这一道午饭。',
+    picks: [{ dish_id: 'd12', matched: facts, reason: '豌杂面兼具咸鲜与微辣口味，煮制并配面条，价格22元。' }],
+  };
+  const candidates = [{ dish_id: 'd12', facts }];
+  const result = validatePicks(value, candidates);
+  assert.equal(result.picks[0].matched.length, 4);
+  assert.throws(() => validatePicks({
+    ...value, picks: [{ ...value.picks[0], matched: [...facts, '不存在的食材'] }],
+  }, candidates));
+});
 test('校验失败只重试一次，然后返回安全规则结果', async (t) => {
   let calls = 0;
   const app = await fixture(t, config('测试凭证'), async () => {
@@ -204,6 +217,36 @@ test('自然语言解析后重做硬筛选，遗漏的已有忌口保持不变',
   assert.ok(result.profile.avoid.includes('organ'));
   assert.ok(result.profile.avoid.includes('peanut'));
   assert.equal(result.source, 'qwen');
+});
+
+test('“清淡”落到口味标签并移除辣味，其他约束与去重保持不变', async (t) => {
+  const spicy = { ...input().profile, tastes: ['咸鲜', '微辣'] };
+  assert.deepEqual(applyTasteIntent(spicy, '今天想清淡一点').tastes, ['咸鲜', '清淡']);
+  assert.deepEqual(applyTasteIntent(spicy, '不想吃辣，养胃一点').tastes, ['咸鲜', '清淡']);
+  assert.deepEqual(applyTasteIntent(spicy, '今天想吃辣').tastes, ['咸鲜', '微辣']);
+  assert.deepEqual(applyTasteIntent({ ...spicy, tastes: ['重辣'] }, '清爽点').tastes, ['清淡']);
+
+  const app = await fixture(t, config('测试凭证'), async (_url, request) => {
+    const body = JSON.parse(request.body);
+    if (body.response_format.json_schema.name === 'lunch_preferences') return response({
+      ...input().profile, tastes: ['咸鲜', '微辣'], avoid: ['cilantro', 'organ', 'peanut'],
+      staplePreference: '米饭', budget: 30, message: '已更新口味和预算。',
+      unsupported_avoid: [], needs_clarification: false,
+    });
+    const { payload, result } = modelAnswer(request);
+    assert.deepEqual(payload.profile.tastes, ['咸鲜', '清淡']);
+    return response(result);
+  });
+  const result = await (await app.post('/api/chat', {
+    ...input(), text: '今天想清淡一点，不吃花生，想吃米饭，预算30元',
+    history: [{ dishId: 'd1', dayIndex: 0 }],
+  })).json();
+  assert.equal(result.profile_applied, true);
+  assert.deepEqual(result.profile.tastes, ['咸鲜', '清淡']);
+  assert.deepEqual(result.profile.avoid, ['cilantro', 'organ', 'peanut']);
+  assert.equal(result.profile.staplePreference, '米饭');
+  assert.equal(result.profile.budget, 30);
+  assert.ok(!result.picks.some((pick) => pick.dish.main === '番茄牛腩'));
 });
 
 test('不能匹配的忌口或预算先澄清，不继续推荐', async (t) => {

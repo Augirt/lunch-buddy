@@ -18,7 +18,7 @@ npm --prefix server start
 打开 <http://127.0.0.1:3000>。后端同时提供页面和 API，不需要前端跨域。
 使用 Python 静态服务或 GitHub Pages 时不具备这些 API，前端应保持规则模式。
 
-本次接入已创建空的 `server/.env`，可直接填 Key；示例复制命令用于新机器初始化。
+`server/.env` 保存本机配置；示例复制命令用于新机器初始化，已有配置时不要覆盖。
 `server/.env` 被 `.gitignore` 忽略；启动后只显示是否读取配置，不打印凭证。
 不要把 Key 放入 app.js、localStorage、聊天消息或发给真实用户。
 修改环境变量后重启服务。当前实现为本机单用户 Demo，尚未部署公开云端。
@@ -40,7 +40,7 @@ npm --prefix server start
 | HOST | 127.0.0.1 | 仅监听本机 |
 | PORT | 3000 | 页面和 API 端口 |
 | MODEL_TIMEOUT_MS | 8000 | 每次模型任务的总时限，含结构错误重试 |
-| MODEL_MAX_TOKENS | 800 | 单次输出上限 |
+| MODEL_MAX_TOKENS | 600 | 单次输出上限 |
 
 调用为 OpenAI 兼容 `POST /chat/completions`，采用
 `response_format: { type: "json_schema", json_schema: { strict: true, ... } }`，
@@ -174,6 +174,9 @@ npm --prefix server start
 明确不能覆盖的忌口（例如菜单未标注芝麻）返回 `picks: []`，先澄清再推荐。
 
 已有忌口会由服务器保守保留；普通口味修改不会清空它。
+“清淡/清爽/养胃/不想吃辣/少辣”会确定为 `tastes` 里的“清淡”，并移除“微辣”“重辣”；
+这是服务端在模型解析后再次强制执行的，不依赖模型是否遵守提示词。
+只有明确说“想吃辣/要辣”时才保留辣味标签。
 取消单项可明确说“现在可以吃香菜”，清空可说“清空忌口”，也可通过设置控件取消。
 
 ## 前端接线要点
@@ -194,11 +197,26 @@ npm --prefix server start
 ```bash
 npm --prefix server test
 curl http://127.0.0.1:3000/api/health
+# 以下会真实调用百炼，并按账号额度计费：
+npm --prefix server run smoke -- --direct
+npm --prefix server run smoke
+npm --prefix server run smoke -- --chat
 ```
 
 测试使用本地替身，不发送真实百炼请求、不消耗账户额度。
-Key 配置后需再做一次真实 `/api/recommend`，确认返回 `source: "qwen"`。
-没有真实凭证前，无法证明账号鉴权、实际响应质量或生产延迟。
+`smoke` 会使用本地临时端口验证真实账号，不中断正在运行的 Demo；
+`--direct` 验证单独模型接口，`--chat` 验证偏好解析和推荐。
+可用 `python3 server/configure-key.py 百炼导出的密钥.csv` 安全导入 Key；
+它只写入 `server/.env`，权限为 600，不打印密钥。
+
+2026-11-27 已用用户提供的真实账号验证：模型接口 HTTP 200；
+推荐返回 `source: "qwen"`、无降级，单次实测 3722ms、输入 1777/输出 336 tokens。
+按当前刊例价，本次推荐约 0.00233 元。这是一次联调结果，不是延迟或推荐质量的统计保证。
+中文对话“不吃花生，今天想吃米饭，预算30元”也已验证：
+保留原有忌口、新增花生、主食改为米饭、预算改为30元，返回三款符合约束的推荐，
+`profile_applied: true`、`source: "qwen"`。
+真实联调还发现模型会多输出有效匹配标签，现已将其归一化为最多 4 条，
+并继续拒绝未知菜品 ID、未知事实和重复菜品。
 
 当前保留原 Demo 的午饭日记忆模型，以 `dayIndex` 对今天、昨天、前天去重，
 同主菜换商家或 SKU 也会被排除。真实订单接入时应由服务端账户历史提供时间戳；
