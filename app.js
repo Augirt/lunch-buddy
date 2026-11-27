@@ -4,7 +4,6 @@ const STORAGE_KEY = 'lunch-buddy-state-v1';
 const DAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
 const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 const COOKING_LABELS = {
   蒸: '清蒸', 煮: '水煮', 炖: '慢炖', 炒: '小炒', 煎: '香煎',
@@ -24,7 +23,6 @@ function seedState() {
     skipped: [],
     skipStats: { cuisines: {}, proteins: {} },
     traceOpen: true,
-    dayAdvanced: false,
   };
 }
 
@@ -760,7 +758,6 @@ function nextDay() {
   state.todayIndex += 1;
   state.accepted = null;
   resetSkips();
-  state.dayAdvanced = true;
   // 只保留最近 10 条记忆，避免演示时间线无限变长
   state.history = state.history
     .filter((entry) => entryRelativeDay(entry) <= 12)
@@ -867,8 +864,3 @@ document.addEventListener('keydown', (event) => {
 /* ---------- boot ---------- */
 
 renderAll();
-
-if (state.dayAdvanced) {
-  state.dayAdvanced = false;
-  saveState();
-}
