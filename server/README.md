@@ -1,5 +1,7 @@
 # Qwen 接入与前端对接
 
+2026-11-28：以下旧接口说明对应默认关闭V2的兼容模式。V2契约见 [前端交接](FRONTEND-V2-HANDOFF.md)。前端V2接入和本地端到端验收已完成：页面最终全量31/31、定向3/3、真实页面11/11通过；本轮新增7次真实模型调用。43项后端回归通过。完整验收证据仅保存在本地，不随仓库发布。独立3001实例启用V2，默认开关与共用3000实例保持原状态。共享工厂打包到app.js，旧实例也能浏览与规则选餐。
+
 选定供应商：阿里云百炼，华北2（北京）。模型：`qwen3.8-flash`。
 官方当前刊例价为输入 0.8 元、输出 2.7 元/百万 tokens；实际费用以控制台账单为准。
 
@@ -15,7 +17,13 @@ cp server/.env.example server/.env
 npm --prefix server start
 ```
 
-打开 <http://127.0.0.1:3000>。后端同时提供页面和 API，不需要前端跨域。
+上述命令启动默认兼容模式。使用已经接入V2的前端自然语言功能时，改为独立实例：
+
+```bash
+AGENT_V2_ENABLED=true PORT=3001 npm --prefix server start
+```
+
+打开 <http://127.0.0.1:3001>。后端同时提供页面和 API，不需要前端跨域；本页检测到默认兼容模式时使用共享规则结果。
 使用 Python 静态服务或 GitHub Pages 时不具备这些 API，前端应保持规则模式。
 
 `server/.env` 保存本机配置；示例复制命令用于新机器初始化，已有配置时不要覆盖。
@@ -41,6 +49,8 @@ npm --prefix server start
 | PORT | 3000 | 页面和 API 端口 |
 | MODEL_TIMEOUT_MS | 8000 | 每次模型任务的总时限，含结构错误重试 |
 | MODEL_MAX_TOKENS | 600 | 单次输出上限 |
+| REQUEST_TIMEOUT_MS | 9000 | V2请求内解析、推荐和重试的统一截止预算 |
+| AGENT_V2_ENABLED | false | V2接口流程开关；独立实例验收后再切换页面 |
 
 调用为 OpenAI 兼容 `POST /chat/completions`，采用
 `response_format: { type: "json_schema", json_schema: { strict: true, ... } }`，
@@ -114,8 +124,8 @@ npm --prefix server start
 ```
 
 `dish` 与 `merchant` 实际是菜单的完整对象，示例为简写。通常返回 3 道不同菜，第一道为首选。
-模型只决定顺序、匹配事实和理由；`rule_score` 是服务器计算的规则分，不是模型置信度。
-如需展示各维度分数，沿用前端规则分，标注其来源，勿将其声称为模型的推理过程。
+模型决定顺序和匹配事实；展示理由由服务端菜单事实模板生成。V2还校验受支持的理由代码。
+`rule_score` 是服务器计算的规则分，不是模型置信度。V2直接返回 `score_parts/learned_bonus/rank_score`，前端应接共享引擎以统一静态模式；详见交接文档。
 `usage` 包含校验重试消耗；缓存命中时保留原响应的 usage，它不是本次新消耗。
 
 无 Key、超时、鉴权失败或输出校验失败均 HTTP 200，返回安全的规则候选：
@@ -134,7 +144,7 @@ npm --prefix server start
 此处 picks 仅简写；有可用菜时实际仍返回最多 3 道。若没有合规候选才返回空数组，
 `fallback_reason: "no_candidates"`。候选不超过 3 道时直接规则推荐，
 `fallback_reason: "few_candidates"`，不消耗模型额度。
-其他兜底代码：`timeout`、`auth_failed`、`rate_limited`、`model_config`、
+其他兜底代码：`timeout`、`auth_failed`、`account_unavailable`、`rate_limited`、`model_config`、
 `invalid_output`、`upstream_error`、`network_error`。
 
 ## POST /api/preferences
@@ -188,7 +198,7 @@ npm --prefix server start
 - “换一个”优先消费已返回的备选；用完后把已换的 dish_id 放进 `skipped` 再调用。
 - 点“就吃这个”后按原方式保存午饭历史；换菜不写入已吃历史。
 - 理由/回复始终用 textContent 或 HTML 转义显示。
-- chat 最多两个任务，建议前端超时至少 `2 * MODEL_TIMEOUT_MS + 2000`。
+- 兼容模式chat最多两个任务；V2的客户端超时取 `/api/health.request_timeout_ms + 1000`，默认10秒，并在设置变更、取消、跨天和重置时丢弃旧响应。
 - 同档案推荐缓存 10 分钟，相同进行中请求合并；临时失败缓存仅 5 秒。
   每个来源 IP 每分钟最多 30 个 API 请求、最多 2 个同时进行，避免无意重复消费。
 
@@ -201,6 +211,10 @@ curl http://127.0.0.1:3000/api/health
 npm --prefix server run smoke -- --direct
 npm --prefix server run smoke
 npm --prefix server run smoke -- --chat
+# V2真实调用只在独立临时端口运行：
+npm --prefix server run smoke -- --v2 --chat --text=今天想清淡一点
+npm --prefix server run eval
+npm --prefix server run eval -- --live --max-calls=30
 ```
 
 测试使用本地替身，不发送真实百炼请求、不消耗账户额度。
@@ -223,6 +237,10 @@ npm --prefix server run smoke -- --chat
 不能把客户端提交的模拟历史当成生产中的可靠订单记忆。
 健康和主食保持原产品的软偏好，忌口、预算、营业状态和主菜去重才是硬约束。
 菜单仍为模拟数据，无法从未标注的食材推断过敏安全或交叉污染。
+
+V2增加Asia/Shanghai日期键、当天强限制与多日选择统计。标准忌口包含蛋白种类兜底；自定义食材须有目录覆盖，未知食材先澄清。学习最多加6分，仅改变软排序，不修改预算、忌口或硬限制。原话与本地行为的保存由前端接入承担，服务端不建立持久用户档案。
+
+当前意图解析有明确范围：支持口味标签、少油、主食、预算、配送时限和目录内忌口的常见表达及澄清。服务端不把模型对未提及字段的提议当作授权。更复杂的自由表达、菜系或蛋白的自然语言软偏好仍需扩充人工标注场景；不能宣称已覆盖全部中文语义。
 
 参考：[模型信息](https://docs.bailian.console.aliyun.com/zh/model-studio/qwen3-8-flash)、
 [Chat API 与北京地址](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)、

@@ -4,3 +4,6 @@
 !.env.example
 node_modules/
 .trae-html-share-packages/
+.trae/
+artifacts/
+/Agent-V2前端端到端验收报告-20261128.md

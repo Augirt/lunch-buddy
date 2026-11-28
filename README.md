@@ -5,7 +5,7 @@
 - 代码仓库：<https://github.com/Augirt/lunch-buddy>
 - 静态在线体验：<https://augirt.github.io/lunch-buddy/>
 
-**GitHub Pages 只能运行静态页面，没有 Node 后端，因此在线体验会明确显示“规则演示”。要使用真实大模型推荐和自然语言解析，请按下面的步骤启动 Node 服务并配置百炼 API Key。**
+**GitHub Pages 只能运行静态页面，没有 Node 后端，因此线上体验只走本地规则，并明确显示“规则演示”。要使用真实大模型推荐和自然语言解析，请按下面的步骤启动 Node 服务并配置百炼 API Key。**
 
 ![模拟外卖首页](assets/preview.png)
 
@@ -45,10 +45,12 @@
 ```bash
 cp server/.env.example server/.env
 # 在 server/.env 中填写 DASHSCOPE_API_KEY
-npm --prefix server start
+AGENT_V2_ENABLED=true PORT=3001 npm --prefix server start
 ```
 
-打开 <http://127.0.0.1:3000>。后端同时提供页面和 API。
+上述复制命令只用于首次初始化；已有 `server/.env` 时直接启动，勿覆盖配置。打开 <http://127.0.0.1:3001>。后端同时提供页面和 V2 API，独立端口不影响共用 3000 实例。
+
+V2 默认关闭（`AGENT_V2_ENABLED=false`）；只有开启 V2 的独立实例（3001）才提供自然语言解析与模型推荐，默认实例和静态页面使用共享规则。
 
 选定模型为阿里云百炼北京的 `qwen3.8-flash`，配置说明和接口契约见 [server/README.md](server/README.md)。修改配置后需重启服务。
 
@@ -85,6 +87,8 @@ data.js                  模拟商家与菜品目录，前后端共享
 server/index.cjs         Node HTTP 服务与 BFF 接口
 server/model.cjs         百炼模型调用与输出校验
 server/recommend-core.cjs 召回、硬约束及规则兜底
+server/recommend-core.js  浏览器与Node共用的引擎工厂
+server/build-frontend.cjs 将同一引擎打包到app.js；--check校验源码一致
 server/.env.example      配置模板，不包含 Key
 server/README.md         模型配置、接口和边界说明
 server/test/api.test.cjs  服务端替身测试
@@ -95,10 +99,19 @@ server/test/api.test.cjs  服务端替身测试
 ```bash
 npm --prefix server test
 node --check app.js
+node server/build-frontend.cjs --check
 ```
+
+修改 `server/recommend-core.js` 后运行 `node server/build-frontend.cjs` 同步浏览器包。这样旧服务只提供原有app.js路径时，也能使用相同规则引擎。
 
 自动化测试使用模型替身；另外已在 2026-11-27 完成真实百炼调用和浏览器联调，确认 `source: "qwen"`、`model: "qwen3.8-flash"`，中文预算、忌口与主食偏好成功应用。真实调用的延迟与推荐质量仍取决于模型和当次需求。
 
-后续“清淡”口味解析已修复，并由 16 项服务端测试覆盖；该修复的真实模型复验遇到百炼账号欠费（HTTP 400 / Arrearage），未完成。额度恢复后需再跑一次真实“清淡”对话；账号状态不影响浏览商家、手动偏好与规则回退。
+“清淡”口味解析已修复，2026-11-28 真实页面复验通过：`source=qwen`、`profile_applied=true`、口味更新为“咸鲜、清淡”并移除“微辣”，耗时约5.6秒。此前百炼账号欠费（HTTP 400 / Arrearage）造成的外部验证阻塞已经解除。
+
+2026-11-28 已完成 Agent V2 的后端与前端接入：共享硬约束与日期引擎、长期/当天偏好、澄清承接、原话与选择事件、学习暂停/清除、事实解释、实际调用和缓存消耗、取消与熔断。默认 `AGENT_V2_ENABLED=false` 保留；页面仅对启用V2的实例调用新接口，其余场景使用共享规则。此前43项后端测试、21项离线场景通过；后端阶段累计28次真实模型请求，场景最新结果21/21通过。
+
+本轮页面自动化最终全量31/31通过（含未重启的共用3000旧实例），缓存消耗展示修正及测试路由清理定向3/3通过；真实页面11/11通过，新增7次模型调用。清淡解析4259ms、多轮预算与花生忌口承接4202ms、硬条件推荐4963ms；无页面运行错误，桌面与390px移动端无横向溢出。真实输入10536/输出1811 tokens，按既有价格估算约0.01332元。这是小样本工程验收，未证明生产SLO或用户偏好效果。
+
+接口与状态契约见 [V2接口与状态契约](server/FRONTEND-V2-HANDOFF.md)。本轮页面验收的完整日志、真实返回和截图仅保存在本地，不随仓库发布。已验证本地静态模式及GitHub Pages域名/子路径模拟；线上 Pages 没有 Node 后端，只提供本地规则模式。V2 默认关闭（`AGENT_V2_ENABLED=false`），自然语言解析与大模型推荐仅在开启 V2 的 3001 实例可用。
 
 偏好和模拟午饭记录存于本地 `localStorage`；本产品没有真实下单、多用户账号、实时库存或真实订单历史。菜单未标注的食材无法可靠推断，模型遇到不支持的忌口会先提示澄清。

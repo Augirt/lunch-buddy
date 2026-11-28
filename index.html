@@ -71,14 +71,16 @@
       <button class="icon-button" type="button" data-action="close-assistant" aria-label="收起小助手">—</button>
     </header>
     <div class="assistant-context"><span id="contextLabel">记住你的口味，避开近两天的主菜</span><button type="button" data-action="memory">查看记忆 ↗</button></div>
+    <p id="storageStatus" class="storage-status" role="status" hidden></p>
     <div class="chat-scroll" id="chatMessages" role="log" aria-live="polite" aria-relevant="additions"></div>
+    <p id="clarificationPrompt" class="clarification-prompt" role="status" hidden></p>
     <div class="chat-progress" id="chatProgress" hidden><span class="thinking-dots"><i></i><i></i><i></i></span><span id="progressText">正在理解你的需求</span><button type="button" data-action="cancel">取消</button></div>
     <form id="chatForm" class="chat-composer">
       <label for="chatInput" class="sr-only">告诉午饭搭子你想吃什么</label>
       <textarea id="chatInput" rows="2" maxlength="500" placeholder="想吃什么、预算多少、不吃什么？" aria-describedby="composerHint"></textarea>
       <div class="composer-bottom"><small id="composerHint">Enter 发送 · Shift + Enter 换行</small><button id="sendButton" type="submit" aria-label="发送消息"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg></button></div>
     </form>
-    <div class="assistant-bottom"><span>餐品来自商家库 · 大模型理解与选餐</span><button type="button" data-action="new-chat">新对话</button></div>
+    <div class="assistant-bottom"><span>演示菜单 · 按条件选餐</span><button type="button" data-action="reconnect">重新连接</button><button type="button" data-action="new-chat">新对话</button></div>
   </section>
 
   <div class="overlay" id="settingsModal" hidden>
@@ -90,6 +92,9 @@
       <form id="settingsForm">
         <label>喜欢的口味 <small>可多选</small></label><div class="preference-chips" id="tasteChips"></div>
         <label>不吃的食材 <small>选中后直接排除</small></label><div class="preference-chips avoid-chips" id="avoidChips"></div>
+        <label for="customAvoidPreference">其他不吃的食材</label>
+        <textarea id="customAvoidPreference" rows="2" maxlength="620" placeholder="例如：鸡蛋、鸡肉；用逗号或顿号分隔"></textarea>
+        <p class="settings-note">只筛掉菜单已标注的食材；未知食材需要向商家确认，不能保证过敏安全。</p>
         <div class="preference-switches">
           <label class="checkbox-label"><input id="healthyPreference" type="checkbox"><span>少油少炸<small>优先用油少、非油炸的餐品</small></span></label>
           <label class="checkbox-label"><input id="staplePriorityPreference" type="checkbox"><span>主食优先<small>这顿饭，尽量吃得饱</small></span></label>
@@ -97,7 +102,14 @@
         <label for="staplePreference">偏好的主食</label><select id="staplePreference"></select>
         <label for="budgetPreference">每餐预算 <strong id="budgetLabel">¥45以内</strong></label>
         <input id="budgetPreference" type="range" min="15" max="60" step="1" value="45">
-        <details class="model-settings-details"><summary>模型连接状态</summary><div class="server-status" id="serverStatus"></div><p class="settings-note">模型通过后台服务调用；未配置时使用明确标注的规则演示。API Key 不会进入浏览器。</p></details>
+        <fieldset class="day-settings"><legend>这顿的限制 <small>次日失效</small></legend>
+          <label class="checkbox-label"><input id="noSpicyPreference" type="checkbox"><span>这顿不吃辣<small>排除菜单标注微辣或重辣的餐品</small></span></label>
+          <label for="hardStaplePreference">这顿的主食限制</label>
+          <select id="hardStaplePreference"><option value="不限">不限</option><option value="米饭">只吃米饭</option><option value="面食">只吃面食</option></select>
+          <label for="maxMinutesPreference">最多等几分钟</label>
+          <input id="maxMinutesPreference" type="number" min="1" max="120" step="1" placeholder="留空表示不限">
+        </fieldset>
+        <details class="model-settings-details"><summary>模型连接状态</summary><div class="server-status" id="serverStatus"></div><button class="button-soft" type="button" data-action="reconnect">重新连接</button><p class="settings-note">模型通过后台服务调用；未配置时使用规则选餐。API Key 不会进入浏览器。</p></details>
         <p id="settingsError" class="form-error" role="alert" hidden></p>
         <button class="button-primary settings-save" type="submit" id="saveSettings">保存偏好，帮我挑 →</button>
       </form>
@@ -119,7 +131,8 @@
       <p class="dialog-description">助手会避开今天和近两天吃过的同一道主菜。</p>
       <div id="memoryContent"></div>
       <button class="button-primary" type="button" data-action="next-day">模拟到明天 →</button>
-      <button class="text-button" type="button" data-action="reset">重置演示数据</button>
+      <button class="button-soft" id="returnToday" type="button" data-action="return-today" hidden>回到真实日期</button>
+      <button class="text-button" type="button" data-action="reset">重置本地偏好与记录</button>
     </section>
   </div>
   <div class="toast" id="toast" role="status"></div>

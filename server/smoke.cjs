@@ -4,7 +4,7 @@ const { createApp, readConfig } = require('./index.cjs');
 const catalog = require('../data.js');
 
 async function main() {
-  const config = readConfig();
+  const config = readConfig({ ...process.env, ...(process.argv.includes('--v2') ? { AGENT_V2_ENABLED: 'true' } : {}) });
   if (!config.apiKey) throw new Error('请先配置 server/.env 中的 DASHSCOPE_API_KEY。');
   const redact = (value) => String(value).split(config.apiKey).join('[密钥已隐藏]')
     .replace(/sk-[A-Za-z0-9._-]+/g, '[密钥已隐藏]');
@@ -73,9 +73,9 @@ async function main() {
     });
     const value = await result.json();
     console.log(JSON.stringify({
-      source: value.source, model: value.model, fallback_reason: value.fallback_reason,
+      request_id: value.request_id, source: value.source, model: value.model, fallback_reason: value.fallback_reason,
       dish_ids: value.picks?.map((pick) => pick.dish_id), usage: value.usage,
-      latency_ms: value.latency_ms, diagnostics,
+      latency_ms: value.latency_ms, request_latency_ms: value.request_latency_ms, telemetry: value.telemetry, diagnostics,
       ...(chat ? { profile_applied: value.profile_applied, profile: value.profile, reply: value.reply, preference_usage: value.preference_usage } : {}),
     }, null, 2));
     if (!result.ok || value.source !== 'qwen' || (chat && !value.profile_applied)) process.exitCode = 1;

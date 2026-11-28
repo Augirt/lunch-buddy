@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env index.cjs",
     "test": "node --test test/*.test.cjs",
-    "smoke": "node --env-file=.env smoke.cjs"
+    "smoke": "node --env-file=.env smoke.cjs",
+    "eval": "node eval/run.cjs"
   }
 }

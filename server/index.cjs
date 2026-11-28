@@ -3,283 +3,320 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
 const catalog = require('../data.js');
+const legacy = require('./legacy-app.cjs');
 const engine = require('./recommend-core.cjs')(catalog);
 const { createModelClient } = require('./model.cjs');
-const ROOT = path.resolve(__dirname, '..');
-const STATIC_FILES = new Map([
-  ['/', ['index.html', 'text/html; charset=utf-8']],
-  ['/index.html', ['index.html', 'text/html; charset=utf-8']],
-  ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
-  ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
-  ['/data.js', ['data.js', 'text/javascript; charset=utf-8']],
-]);
-const FALLBACK_MESSAGES = {
-  missing_key: '尚未配置模型，先按你的口味用规则推荐。',
-  timeout: '模型回复超时，已切换为规则推荐。',
-  auth_failed: '模型凭证或权限未就绪，已切换为规则推荐。',
-  rate_limited: '模型请求暂时受限，已切换为规则推荐。',
-  model_config: '模型名称或接口配置需检查，已切换为规则推荐。',
-  invalid_output: '模型结果未通过校验，已切换为规则推荐。',
-  upstream_error: '模型服务暂时不可用，已切换为规则推荐。',
-  network_error: '模型连接暂时不可用，已切换为规则推荐。',
-  few_candidates: '候选较少，直接为你挑出符合约束的菜品。',
-};
-
+const { inspectIntent, applyValidatedIntent, applyTasteIntent, question } = require('./intent.cjs');
+const { candidate, renderReason, updateMessage, fallbackMessages } = require('./explanation.cjs');
+const VERSIONS = { rules: '2.0.0', prompt: '2.0.0', schema: '2.0.0', learning: '1.0.0',
+  catalog: createHash('sha256').update(JSON.stringify(catalog)).digest('hex').slice(0, 12) };
+const STATIC = new Map([['/', 'index.html'], ['/index.html', 'index.html'], ['/app.js', 'app.js'],
+  ['/data.js', 'data.js'], ['/styles.css', 'styles.css'], ['/server/recommend-core.js', 'server/recommend-core.js']]);
 function readConfig(env = process.env) {
-  const number = (key, fallback, min, max) => {
-    const value = Number(env[key] || fallback);
-    if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${key} 配置不正确。`);
-    return value;
-  };
-  const baseUrl = (env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1').replace(/\/+$/, '');
-  const parsed = new URL(baseUrl);
-  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash ||
-    !(parsed.hostname === 'dashscope.aliyuncs.com' ||
-      /^[a-z0-9-]+\.cn-beijing\.maas\.aliyuncs\.com$/.test(parsed.hostname)) ||
-    parsed.pathname !== '/compatible-mode/v1') {
-    throw new Error('DASHSCOPE_BASE_URL 需为百炼北京的 HTTPS 兼容接口地址。');
-  }
-  return {
-    apiKey: env.DASHSCOPE_API_KEY?.trim() || '',
-    baseUrl, model: env.QWEN_MODEL || 'qwen3.8-flash',
-    timeoutMs: number('MODEL_TIMEOUT_MS', 8000, 1000, 60000),
-    maxTokens: number('MODEL_MAX_TOKENS', 600, 300, 2000),
-    host: env.HOST || '127.0.0.1', port: number('PORT', 3000, 1, 65535),
-  };
+  const base = legacy.readConfig(env);
+  const requestTimeoutMs = Number(env.REQUEST_TIMEOUT_MS || 9000);
+  if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1000 || requestTimeoutMs > 60000) throw new Error('REQUEST_TIMEOUT_MS 配置不正确。');
+  if (env.AGENT_V2_ENABLED && !['true', 'false'].includes(env.AGENT_V2_ENABLED)) throw new Error('AGENT_V2_ENABLED 必须是true或false。');
+  return { ...base, requestTimeoutMs, agentV2: env.AGENT_V2_ENABLED === 'true' };
 }
-
+const emptyUsage = () => ({ prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, unknown: false });
+function addUsage(usages) {
+  return usages.reduce((total, usage) => {
+    if (!usage) return total;
+    for (const key of ['prompt_tokens', 'completion_tokens', 'cached_tokens']) total[key] += usage[key] || 0;
+    total.unknown ||= Boolean(usage.unknown);
+    return total;
+  }, emptyUsage());
+}
+function phase() { return { status: 'not_run', attempts: 0, latency_ms: 0, usage: emptyUsage() }; }
+function context(config, signal) {
+  return { started: Date.now(), deadline: Date.now() + (config.requestTimeoutMs || 9000), signal,
+    budget: { calls: 0, limit: 3 }, phases: { parse: phase(), recommend: phase() } };
+}
+function semanticKey(state) {
+  const sort = list => [...new Set(list)].sort();
+  const profile = { ...state.profile, tastes: sort(state.profile.tastes), avoid: sort(state.profile.avoid), customAvoid: sort(state.profile.customAvoid) };
+  const day = state.day_preferences ? { ...state.day_preferences,
+    ...(state.day_preferences.tastes ? { tastes: sort(state.day_preferences.tastes) } : {}) } : null;
+  return createHash('sha256').update(JSON.stringify({ versions: VERSIONS, profile,
+    constraints: { ...state.constraints, cuisines: sort(state.constraints.cuisines), proteins: sort(state.constraints.proteins) },
+    persistent: state.persistent_constraints, date: state.date_key, day, todayIndex: state.todayIndex,
+    history: [...state.history].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    skipped: sort(state.skipped), events: [...state.selection_events].sort((a, b) => a.event_id.localeCompare(b.event_id)),
+    learning_enabled: state.learning_enabled })).digest('hex');
+}
+function json(res, status, body) {
+  if (res.destroyed || res.headersSent) return;
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+  res.end(JSON.stringify(body));
+}
 async function readJson(req) {
-  if (!(req.headers['content-type'] || '').startsWith('application/json')) {
-    throw Object.assign(new Error('请使用 application/json。'), { status: 415 });
-  }
-  let size = 0;
-  const chunks = [];
+  if (!(req.headers['content-type'] || '').startsWith('application/json')) throw Object.assign(new Error('请使用application/json。'), { status: 415 });
+  const chunks = []; let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 16384) throw Object.assign(new Error('请求内容过长。'), { status: 413 });
+    if (size > 32768) throw Object.assign(new Error('请求内容过长。'), { status: 413 });
     chunks.push(chunk);
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-  catch { throw Object.assign(new Error('请求不是合法 JSON。'), { status: 400 }); }
+  catch { throw Object.assign(new Error('请求不是合法JSON。'), { status: 400 }); }
 }
-
-function json(res, status, body) {
-  res.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
-  });
-  res.end(JSON.stringify(body));
-}
-
-function preserveAvoid(profile, previous, text) {
-  // 解析器不能因漏字段或普通口味修改而清掉已有忌口。
-  const clearAll = /^(清空忌口|取消所有忌口|取消全部忌口)[。！!.\s]*$/.test(text.trim());
-  const protectedIds = clearAll ? [] : previous.avoid.filter((id) => {
-    const option = catalog.AVOID_OPTIONS.find((item) => item.id === id);
-    return ![option.label, ...option.terms].some((label) =>
-      new RegExp(`(?:^|[，,。；;\\s])(?:现在)?(?:可以吃|取消忌口[:：]?)${label}`).test(text));
-  });
-  return { ...profile, avoid: [...new Set([...protectedIds, ...profile.avoid])] };
-}
-
-const LIGHT_TASTE = /清淡|清爽|养胃|不辣|不吃辣|不要辣|少辣|别太辣|不要太辣|口味轻/;
-
-function applyTasteIntent(profile, text) {
-  // 菜单里有“清淡”标签：用户原话必须先落到标签上，不能只留给模型解释成少油。
-  if (!LIGHT_TASTE.test(text)) return profile;
-  const tastes = profile.tastes.filter((taste) => taste !== '微辣' && taste !== '重辣');
-  if (!tastes.includes('清淡')) tastes.push('清淡');
-  return { ...profile, tastes };
-}
-
 function createApp(config = readConfig(), options = {}) {
+  if (!config.agentV2) return legacy.createApp(config, options);
   const model = createModelClient(config, options.fetchImpl);
-  const cache = new Map();
-  const inFlight = new Map();
-  const requests = new Map();
-  const clientCounts = new Map();
-
-  async function recommendation(state, forcedFallback) {
+  const cache = new Map(), inFlight = new Map(), clients = new Map();
+  function decorate(data, picks) {
+    return picks.map(pick => {
+      const item = data.visible.find(item => item.dish.id === pick.dish_id);
+      return { ...pick, reason: renderReason(item.dish), rule_score: item.score, score_parts: item.parts,
+        learned_bonus: item.learned_bonus, learned_parts: item.learned_parts, rank_score: item.rank_score,
+        dish: item.dish, merchant: catalog.MERCHANTS.find(m => m.id === item.dish.merchantId) };
+    });
+  }
+  function trace(state, data, picks = []) {
+    return { counts: data.counts, model_candidate_count: Math.min(15, data.visible.length),
+      omitted_from_model: Math.max(0, data.visible.length - 15), versions: VERSIONS,
+      persistent_profile: state.profile, day_preferences: state.day_preferences,
+      constraints: state.constraints, persistent_constraints: state.persistent_constraints,
+      learning: data.learning, picks: picks.map(({ dish_id, matched, rule_score, score_parts, learned_bonus, rank_score, learned_parts }) =>
+        ({ dish_id, matched, rule_score, score_parts, learned_bonus, rank_score, learned_parts })),
+      score_note: '规则分用于排序，学习加分来自历史选择；两者不是模型置信度。菜单为演示数据，食材标注不完整，不能保证无过敏原。' };
+  }
+  function clarification(state, data, items, code = 'clarification_required', pending = null) {
+    const questions = items.slice(0, 2);
+    const reply = questions.map(q => q.question).join(' ');
+    return { picks: [], source: 'rules', fallback_reason: code, summary: reply, reply,
+      profile: { ...state.profile, ...state.day_preferences }, persistent_profile: state.profile,
+      day_preferences: state.day_preferences, constraints: state.constraints, persistent_constraints: state.persistent_constraints,
+      profile_applied: false, needs_clarification: true,
+      clarification: { questions, context: pending?.context || '', round: pending?.round || 1 },
+      changes: [], model: null, usage: null, decision_trace: trace(state, data) };
+  }
+  function rules(state, data, reason) {
+    const choices = data.visible.slice(0, 3).map(item => {
+      const c = candidate(item, { ...state.profile, ...state.day_preferences });
+      return { dish_id: c.dish_id, matched: c.facts.slice(0, 3), rationale_codes: c.supported_rationale_codes };
+    });
+    const picks = decorate(data, choices);
+    return { source: 'rules', fallback_reason: reason, picks, summary: fallbackMessages[reason] || fallbackMessages.upstream_error,
+      model: null, usage: null, candidate_count: data.visible.length,
+      excluded: { avoid: data.counts.avoid, budget: data.counts.budget, history: data.counts.history, constraints: data.counts.constraints },
+      decision_trace: trace(state, data, picks) };
+  }
+  async function recommendation(state, ctx, maxAttempts = 2, forced) {
     const data = engine.analyze(state);
-    const candidates = data.visible.slice(0, 15).map((item) => {
-      const dish = item.dish;
-      return {
-        dish_id: dish.id, name: dish.name, main: dish.main,
-        ingredients: dish.ingredients, tastes: dish.tastes, cooking: dish.cooking,
-        oil: dish.oil, fried: dish.fried, staple: dish.staple, price: dish.price,
-        rating: dish.rating, minutes: dish.minutes, rule_score: item.score,
-        facts: [...dish.tastes, `做法：${dish.cooking}`, ...(dish.staple ? [`主食：${dish.staple}`] : []), `价格：${dish.price}元`],
-      };
-    });
-    const metadata = {
-      candidate_count: data.visible.length,
-      excluded: { avoid: data.avoidRemoved.length, budget: data.budgetRemoved.length, history: data.historyRemoved.length },
-    };
-    if (!candidates.length) {
-      return { ...metadata, source: 'rules', fallback_reason: 'no_candidates', picks: [],
-        summary: '没有符合忌口、预算和近期主菜限制的候选。', model: null, usage: null };
+    if (data.unsupported_avoid.length) return clarification(state, data, [question('customAvoid', 'unsupported_avoid',
+      `菜单没有完整标注${data.unsupported_avoid.join('、')}，请先向商家确认食材。`, ['已确认食材'])], 'unsupported_avoid');
+    if (!data.visible.length) return clarification(state, data, [question('budget', 'no_candidates',
+      '没有符合当前限制的菜品。是否调整预算、主食或配送时效？忌口继续保留。', ['预算15至60元', '主食不限', '配送不限', '保持'])], 'no_candidates');
+    const p = ctx.phases.recommend;
+    if (forced || !config.apiKey || data.visible.length <= 3) {
+      p.status = 'rules';
+      return rules(state, data, forced || (!config.apiKey ? 'missing_key' : 'few_candidates'));
     }
-    const decorate = (picks) => picks.map((pick) => {
-      const item = data.visible.find((entry) => entry.dish.id === pick.dish_id);
-      const merchant = catalog.MERCHANTS.find((entry) => entry.id === item.dish.merchantId);
-      return { ...pick, rule_score: item.score, dish: item.dish, merchant };
-    });
-    const fallback = (reason) => ({
-      ...metadata, source: 'rules', fallback_reason: reason, model: null, usage: null,
-      summary: FALLBACK_MESSAGES[reason] || FALLBACK_MESSAGES.upstream_error,
-      picks: decorate(candidates.slice(0, 3).map((dish) => ({
-        dish_id: dish.dish_id, matched: dish.facts.slice(0, 3),
-        reason: `${dish.name}，${dish.tastes.join('、')}口味，${dish.cooking}制${dish.staple ? `并配${dish.staple}` : ''}，价格${dish.price}元；已按你的忌口、预算和近期主菜记录筛选。`,
-      }))),
-    });
-    if (forcedFallback) return fallback(forcedFallback);
-    if (!config.apiKey) return fallback('missing_key');
-    if (candidates.length <= 3) return fallback('few_candidates');
+    p.status = 'model';
+    const effective = { ...state.profile, ...state.day_preferences };
     try {
       const response = await model.recommend({
-        profile: { ...state.profile, avoid: state.profile.avoid.map((id) => catalog.AVOID_OPTIONS.find((item) => item.id === id).label) },
-        recent_main_dishes: data.recentDishes.map((entry) => entry.dish.main),
-        skipped_dishes: state.skipped, candidates,
-      });
-      // 候选来自服务端菜单；输出 ID 和匹配属性已重新验证，食材/价格只由服务端补全。
-      return {
-        ...metadata, source: 'qwen', model: config.model,
-        picks: decorate(response.result.picks), summary: response.result.summary,
-        usage: response.usage, latency_ms: response.latency_ms, attempts: response.attempts,
-        fallback_reason: null,
-      };
+        profile: effective, constraints: state.constraints,
+        recent_main_dishes: data.recentDishes.map(e => e.dish.main),
+        candidates: data.visible.slice(0, 15).map(item => candidate(item, effective)),
+      }, { ...ctx, phase: p, maxAttempts });
+      const picks = decorate(data, response.result.picks);
+      return { source: 'qwen', fallback_reason: null, picks, summary: '已从符合本次约束的菜单中选出午饭。',
+        model: config.model, usage: response.usage, attempts: response.attempts, latency_ms: response.latency_ms,
+        candidate_count: data.visible.length, decision_trace: trace(state, data, picks) };
     } catch (error) {
-      console.warn(`[模型兜底] ${error.code || 'upstream_error'}`);
-      return fallback(error.code || 'upstream_error');
+      p.status = error.code === 'cancelled' ? 'cancelled' : 'failed'; p.error_code = error.code;
+      return rules(state, data, error.code || 'upstream_error');
     }
   }
-
-  async function cachedRecommendation(state) {
-    const key = createHash('sha256').update(JSON.stringify(state)).digest('hex');
+  async function cachedRecommendation(state, caller, maxAttempts = 2) {
+    const key = semanticKey(state);
     const saved = cache.get(key);
-    if (saved && saved.expires > Date.now()) return { ...saved.value, cache_hit: true };
-    if (inFlight.has(key)) return { ...await inFlight.get(key), cache_hit: true };
-    const promise = recommendation(state);
-    inFlight.set(key, promise);
+    if (saved?.expires > Date.now()) {
+      caller.phases.recommend = { ...phase(), cached: true, origin_source: saved.value.source };
+      return { ...saved.value, cache_hit: true, origin_usage: saved.origin_usage };
+    }
+    let shared = inFlight.get(key), owner = false;
+    if (!shared) {
+      owner = true;
+      const controller = new AbortController();
+      const timeout = AbortSignal.timeout(Math.max(1, caller.deadline - Date.now()));
+      const ctx = context(config, AbortSignal.any([controller.signal, timeout]));
+      ctx.deadline = caller.deadline;
+      ctx.budget.limit = Math.min(maxAttempts, caller.budget.limit - caller.budget.calls);
+      shared = { controller, ctx, subscribers: new Set() };
+      inFlight.set(key, shared);
+      shared.promise = recommendation(state, ctx, maxAttempts).then(value => {
+        const origin_usage = ctx.phases.recommend.usage;
+        if (!controller.signal.aborted && !value.needs_clarification) {
+          const transient = value.fallback_reason && !['missing_key', 'few_candidates'].includes(value.fallback_reason);
+          cache.set(key, { value, origin_usage, expires: Date.now() + (transient ? 5000 : 600000) });
+          if (cache.size > 200) cache.delete(cache.keys().next().value);
+        }
+        return { value, origin_usage };
+      }).finally(() => { if (inFlight.get(key) === shared) inFlight.delete(key); });
+    }
+    const token = Symbol(); shared.subscribers.add(token);
+    let onAbort;
+    const cancelled = new Promise((_, reject) => {
+      onAbort = () => reject(Object.assign(new Error('本次请求中止。'), { code:
+        caller.signal.reason?.name === 'TimeoutError' ? 'timeout' : 'cancelled' }));
+      if (caller.signal.aborted) onAbort();
+      else caller.signal.addEventListener('abort', onAbort, { once: true });
+    });
     try {
-      const value = await promise;
-      const transient = value.fallback_reason && !['missing_key', 'few_candidates', 'no_candidates'].includes(value.fallback_reason);
-      cache.set(key, { value, expires: Date.now() + (transient ? 5000 : 600000) });
-      if (cache.size > 200) cache.delete(cache.keys().next().value);
-      return { ...value, cache_hit: false };
-    } finally { inFlight.delete(key); }
+      const { value, origin_usage } = await Promise.race([shared.promise, cancelled]);
+      if (owner) {
+        caller.phases.recommend = { ...shared.ctx.phases.recommend };
+        caller.budget.calls += shared.ctx.budget.calls;
+      } else caller.phases.recommend = { ...phase(), shared: true, origin_source: value.source };
+      return { ...value, cache_hit: !owner, origin_usage };
+    } catch (error) {
+      if (owner) {
+        caller.phases.recommend = { ...shared.ctx.phases.recommend,
+          status: error.code === 'cancelled' ? 'cancelled' : 'failed',
+          error_code: error.code, usage: { ...shared.ctx.phases.recommend.usage, unknown: true } };
+        caller.budget.calls += shared.ctx.budget.calls;
+      }
+      throw error;
+    } finally {
+      caller.signal.removeEventListener('abort', onAbort);
+      shared.subscribers.delete(token);
+      if (!shared.subscribers.size && inFlight.get(key) === shared) {
+        inFlight.delete(key); shared.controller.abort(new DOMException('所有请求已取消。', 'AbortError'));
+      }
+    }
   }
-
-  return http.createServer(async (req, res) => {
+  function finish(res, status, value, ctx, requestId) {
+    const actual = addUsage(Object.values(ctx.phases).map(p => p.usage));
+    const telemetry = { request_id: requestId, request_latency_ms: Date.now() - ctx.started,
+      stages: ctx.phases, model_calls: ctx.budget.calls, cache_hit: Boolean(value.cache_hit),
+      actual_usage: actual, origin_usage: value.origin_usage || null, versions: VERSIONS,
+      candidate_count: value.candidate_count ?? value.decision_trace?.counts.eligible ?? 0,
+      result_status: value.needs_clarification ? 'clarification' : value.fallback_reason || 'ok' };
+    if (value.decision_trace) value = { ...value, decision_trace: { ...value.decision_trace,
+      stages: ctx.phases, cache_hit: telemetry.cache_hit, fallback_reason: value.fallback_reason } };
+    json(res, status, { ...value, request_id: requestId, request_latency_ms: telemetry.request_latency_ms, telemetry });
+  }
+  const server = http.createServer(async (req, res) => {
     let release;
+    const controller = new AbortController();
+    res.once('close', () => { if (!res.writableEnded) controller.abort(new DOMException('客户端断开。', 'AbortError')); });
+    const ctx = context(config, AbortSignal.any([controller.signal, AbortSignal.timeout(config.requestTimeoutMs || 9000)]));
+    const requestId = randomUUID();
     try {
       const pathname = new URL(req.url, 'http://localhost').pathname;
-      if (req.method === 'GET' && pathname === '/api/health') {
-        return json(res, 200, { ok: true, configured: Boolean(config.apiKey), model: config.model });
-      }
-      if (req.method === 'POST' && ['/api/recommend', '/api/preferences', '/api/chat'].includes(pathname)) {
-        // 同源写入；不给第三方网页跨域消费模型额度。
-        const origin = req.headers.origin;
-        if (origin && new URL(origin).host !== req.headers.host) return json(res, 403, { error: '请从本站页面发起请求。' });
+      if (req.method === 'GET' && pathname === '/api/health') return json(res, 200, {
+        ok: true, configured: Boolean(config.apiKey), model: config.model, agent_v2_enabled: true,
+        request_timeout_ms: config.requestTimeoutMs || 9000, versions: VERSIONS });
+      if (req.method === 'POST' && ['/api/recommend', '/api/chat', '/api/preferences'].includes(pathname)) {
+        if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) return json(res, 403, { error: '请从本站发起请求。' });
         const client = req.socket.remoteAddress;
-        const now = Date.now();
-        const record = requests.get(client);
-        const current = record && record.until > now ? record : { count: 0, until: now + 60000 };
-        current.count += 1;
-        requests.set(client, current);
-        if (current.count > 30 || (clientCounts.get(client) || 0) >= 2) {
-          return json(res, 429, { error: '操作太快，请稍后重试。' });
-        }
-        if (requests.size > 1000) {
-          for (const [ip, item] of requests) if (item.until <= now) requests.delete(ip);
-        }
-        clientCounts.set(client, (clientCounts.get(client) || 0) + 1);
-        release = () => {
-          const count = (clientCounts.get(client) || 1) - 1;
-          if (count) clientCounts.set(client, count); else clientCounts.delete(client);
-        };
+        const old = clients.get(client);
+        const entry = old && old.until > Date.now() ? old : { count: 0, active: old?.active || 0, until: Date.now() + 60000 };
+        entry.count++;
+        if (entry.count > 30 || entry.active >= 2) return json(res, 429, { error: '操作太快，请稍后重试。' });
+        entry.active++; clients.set(client, entry); release = () => { entry.active--; };
+        if (clients.size > 1000) for (const [key, value] of clients) if (!value.active && value.until <= Date.now()) clients.delete(key);
         const input = await readJson(req);
         let state;
         try { state = engine.normalizeRequest(input); }
         catch (error) { return json(res, 400, { error: error.message }); }
-        const requestId = randomUUID();
-        if (pathname === '/api/preferences' || pathname === '/api/chat') {
-          if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 500) {
-            return json(res, 400, { error: '请填写 1 至 500 字的午饭偏好。' });
-          }
-          const isChat = pathname === '/api/chat';
-          if (!config.apiKey) {
-            if (!isChat) return json(res, 503, { error: '尚未配置百炼 API Key，请先用设置选项调整口味。', code: 'missing_key' });
-            return json(res, 200, {
-              ...await cachedRecommendation(state), request_id: requestId,
-              profile: state.profile, profile_applied: false,
-              reply: '尚未配置百炼 API Key，这句话还没有解析。当前推荐仍按已设置的口味档案生成；请先用设置选项调整偏好。',
-            });
-          }
-          const messages = input.messages ?? [];
-          if (!Array.isArray(messages) || messages.length > 8 || !messages.every((item) =>
-            item && ['user', 'assistant'].includes(item.role) &&
-            typeof item.content === 'string' && item.content.length <= 500)) {
-            return json(res, 400, { error: '对话上下文最多 8 条，每条最多 500 字。' });
-          }
-          try {
-            const response = await model.parsePreferences({
-              profile: state.profile, text: input.text.trim(), avoid_options: catalog.AVOID_OPTIONS,
-              supported_staples: engine.STAPLES, messages,
-            }, catalog, engine);
-            const { message, unsupported_avoid, needs_clarification, ...parsedProfile } = response.result;
-            // 口味意图在服务端兜底落实；忌口、预算、主食仍按解析结果和原档案处理。
-            const profile = preserveAvoid(applyTasteIntent(parsedProfile, input.text.trim()), state.profile, input.text);
-            if (unsupported_avoid.length || needs_clarification) {
-              const code = unsupported_avoid.length ? 'unsupported_avoid' : 'clarification_required';
-              if (!isChat) return json(res, 422, { error: message, code, unsupported_avoid });
-              return json(res, 200, {
-                request_id: requestId, profile: state.profile, profile_applied: false,
-                picks: [], summary: message, reply: message, source: 'qwen',
-                model: config.model, fallback_reason: code, usage: response.usage,
-              });
+        if (pathname === '/api/recommend') {
+          try { return finish(res, 200, await cachedRecommendation(state, ctx), ctx, requestId); }
+          catch (error) {
+            ctx.phases.recommend.status = error.code === 'cancelled' ? 'cancelled' : 'failed';
+            ctx.phases.recommend.error_code = error.code || 'timeout';
+            if (error.code === 'timeout') {
+              ctx.phases.recommend.usage.unknown = true;
+              return finish(res, 200, rules(state, engine.analyze(state), 'timeout'), ctx, requestId);
             }
-            if (!isChat) return json(res, 200, { request_id: requestId, profile, message, usage: response.usage });
-            const result = await cachedRecommendation(engine.normalizeRequest({ ...state, profile }));
-            return json(res, 200, {
-              ...result, request_id: requestId, profile, profile_applied: true,
-              reply: `${message} ${result.summary}`, preference_usage: response.usage,
-            });
-          } catch (error) {
-            if (isChat) return json(res, 200, {
-              ...await recommendation(state, error.code || 'invalid_output'), request_id: requestId, profile: state.profile,
-              profile_applied: false,
-              reply: '这句话暂时无法解析，原有口味档案已保留。请用设置选项调整后再推荐。',
-              fallback_reason: error.code || 'invalid_output',
-            });
-            return json(res, 502, { error: FALLBACK_MESSAGES[error.code] || '偏好解析暂时不可用，请用下方选项设置。' });
+            throw error;
           }
         }
-        const started = Date.now();
-        const result = await cachedRecommendation(state);
-        return json(res, 200, { ...result, request_id: requestId, request_latency_ms: Date.now() - started });
+        const isChat = pathname === '/api/chat';
+        if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 500) return json(res, 400, { error: '请填写1至500字的午饭偏好。' });
+        const messages = input.messages ?? [];
+        if (!Array.isArray(messages) || messages.length > 8 || !messages.every(m => m && ['user', 'assistant'].includes(m.role) &&
+          typeof m.content === 'string' && m.content.length <= 500)) return json(res, 400, { error: '对话上下文格式不正确。' });
+        if (!config.apiKey) {
+          if (!isChat) return finish(res, 503, { error: '尚未配置模型。', code: 'missing_key', profile_applied: false }, ctx, requestId);
+          return finish(res, 200, { ...await cachedRecommendation(state, ctx), profile: state.profile, profile_applied: false,
+            reply: '尚未配置模型，这句话还没有解析。请用设置选项调整偏好。', changes: [],
+            utterance_event: { event_id: requestId, text: input.text.trim(), date_key: state.date_key, parsed: false, changes: [] } }, ctx, requestId);
+        }
+        let inspection;
+        try { inspection = inspectIntent(input.text.trim(), state, input.pending_clarification || null); }
+        catch (error) { return json(res, 400, { error: error.message }); }
+        if (inspection.needs_clarification) {
+          const result = clarification(state, engine.analyze(state), inspection.clarification.questions,
+            inspection.unsupported_avoid.length ? 'unsupported_avoid' : 'clarification_required', inspection.clarification);
+          return finish(res, isChat ? 200 : 422, { ...result, unsupported_avoid: inspection.unsupported_avoid,
+            utterance_event: { event_id: requestId, text: input.text.trim(), date_key: state.date_key, parsed: false, changes: [] } }, ctx, requestId);
+        }
+        if (inspection.out_of_scope || inspection.stop) return finish(res, 200, {
+          ...clarification(state, engine.analyze(state), []), needs_clarification: false, clarification: null,
+          fallback_reason: inspection.stop ? 'unchanged' : 'out_of_scope',
+          reply: inspection.stop ? '已保留当前设置。' : '我只能处理午饭偏好、选餐、换批和选餐解释。',
+        }, ctx, requestId);
+        try {
+          ctx.phases.parse.status = 'model';
+          const parsed = await model.parsePreferences({
+            profile: state.profile, text: input.text.trim(), avoid_options: catalog.AVOID_OPTIONS,
+            supported_staples: engine.STAPLES, messages, pending_clarification: input.pending_clarification || null,
+          }, catalog, engine, { ...ctx, phase: ctx.phases.parse });
+          const applied = applyValidatedIntent(parsed.result, inspection, input.text);
+          state = engine.normalizeRequest({ ...state, profile: applied.profile, constraints: applied.constraints,
+            persistent_constraints: applied.persistent_constraints, day_preferences: applied.day_preferences });
+          const common = { profile: { ...state.profile, ...state.day_preferences }, persistent_profile: state.profile,
+            day_preferences: state.day_preferences, constraints: state.constraints, persistent_constraints: state.persistent_constraints,
+            changes: applied.changes, profile_applied: applied.applied, clarification: null, needs_clarification: false,
+            preference_usage: parsed.usage, utterance_event: { event_id: requestId, text: input.text.trim(),
+              date_key: state.date_key, parsed: true, changes: applied.changes } };
+          if (!isChat) return finish(res, 200, { ...common, message: updateMessage(applied.changes) }, ctx, requestId);
+          let result;
+          try { result = await cachedRecommendation(state, ctx, 1); }
+          catch (error) {
+            if (error.code === 'cancelled') throw error;
+            result = rules(state, engine.analyze(state), error.code || 'timeout');
+          }
+          return finish(res, 200, { ...result, ...common,
+            ...(result.needs_clarification ? { needs_clarification: true, clarification: result.clarification } : {}),
+            reply: `${updateMessage(applied.changes)} ${result.summary}` }, ctx, requestId);
+        } catch (error) {
+          ctx.phases.parse.status = error.code === 'cancelled' ? 'cancelled' : 'failed';
+          ctx.phases.parse.error_code = error.code || 'invalid_output';
+          return finish(res, isChat ? 200 : 502, { ...await recommendation(state, ctx, 1, error.code || 'invalid_output'),
+            profile: state.profile, persistent_profile: state.profile, profile_applied: false, changes: [],
+            reply: '这句话暂时无法解析，原设置已保留。请用设置选项调整偏好。',
+            utterance_event: { event_id: requestId, text: input.text.trim(), date_key: state.date_key, parsed: false, changes: [] },
+          }, ctx, requestId);
+        }
       }
-      const file = STATIC_FILES.get(pathname);
+      const file = STATIC.get(pathname);
       if (req.method === 'GET' && file) {
-        const content = await fs.readFile(path.join(ROOT, file[0]));
-        res.writeHead(200, {
-          'Content-Type': file[1], 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff',
-          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://copilot-cn.bytedance.net; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
-        });
+        const content = await fs.readFile(path.join(__dirname, '..', file));
+        res.writeHead(200, { 'Content-Type': file.endsWith('.css') ? 'text/css; charset=utf-8' : file.endsWith('.js')
+          ? 'text/javascript; charset=utf-8' : 'text/html; charset=utf-8', 'Cache-Control': 'no-cache',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://copilot-cn.bytedance.net; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'" });
         return res.end(content);
       }
       json(res, 404, { error: '没有找到该页面或接口。' });
     } catch (error) {
-      if (!res.headersSent && !res.destroyed) json(res, error.status || 500, { error: error.status ? error.message : '服务暂时不可用。' });
+      if (['timeout', 'cancelled'].includes(error.code)) return finish(res, 200, {
+        source: 'rules', picks: [], fallback_reason: error.code, profile_applied: false,
+        summary: fallbackMessages.timeout, reply: fallbackMessages.timeout,
+      }, ctx, requestId);
+      json(res, error.status || 500, { error: error.status ? error.message : '服务暂时不可用。' });
     } finally { release?.(); }
   });
+  return server;
 }
-
 if (require.main === module) {
   const config = readConfig();
-  createApp(config).listen(config.port, config.host, () => {
-    console.log(`午饭搭子已启动：http://${config.host}:${config.port}`);
-    console.log(config.apiKey ? `模型：${config.model}（服务端配置已读取）` : '尚未配置 API Key：规则推荐可用，配置后重启即可启用 Qwen。');
-  });
+  createApp(config).listen(config.port, config.host, () => console.log(`午饭搭子已启动：http://${config.host}:${config.port}（Agent V2 ${config.agentV2 ? '开启' : '关闭'}）`));
 }
-module.exports = { createApp, readConfig, engine, applyTasteIntent };
+module.exports = { createApp, readConfig, engine, applyTasteIntent, semanticKey, VERSIONS };
